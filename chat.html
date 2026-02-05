@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sticker Chat Pro</title>
+    <style>
+        :root {
+            --bg-color: #f0f2f5;
+            --bubble-user: #0095f6;
+            --panel-bg: #ffffff;
+        }
+
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            background: var(--bg-color); 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            margin: 0; 
+        }
+
+        /* Contenedor tipo Celular */
+        .phone-container { 
+            width: 350px; 
+            height: 600px; 
+            background: white; 
+            border-radius: 30px; 
+            box-shadow: 0 20px 50px rgba(0,0,0,0.2); 
+            display: flex; 
+            flex-direction: column; 
+            overflow: hidden; 
+            position: relative; 
+            border: 8px solid #222; 
+        }
+
+        /* Área de mensajes */
+        #chat-window { 
+            flex: 1; 
+            padding: 15px; 
+            overflow-y: auto; 
+            display: flex; 
+            flex-direction: column; 
+            gap: 10px; 
+            background: #fafafa; 
+        }
+
+        .sticker-msg { 
+            max-width: 150px; 
+            height: auto; 
+            align-self: flex-end; 
+            animation: pop 0.3s ease; 
+        }
+
+        @keyframes pop { 
+            0% { transform: scale(0.5); } 
+            100% { transform: scale(1); } 
+        }
+
+        /* Barra de entrada */
+        .input-area { 
+            padding: 10px; 
+            display: flex; 
+            align-items: center; 
+            border-top: 1px solid #eee; 
+            background: white; 
+        }
+
+        .sticker-btn { 
+            background: none; 
+            border: none; 
+            font-size: 24px; 
+            cursor: pointer; 
+            padding: 5px; 
+            filter: grayscale(1); 
+            transition: 0.2s; 
+        }
+        .sticker-btn:hover { 
+            filter: grayscale(0); 
+            transform: scale(1.1); 
+        }
+
+        /* Panel de Stickers */
+        #sticker-panel {
+            position: absolute; 
+            bottom: 60px; 
+            left: 10px; 
+            width: 220px; 
+            max-height: 200px;
+            overflow-y: auto;
+            background: var(--panel-bg);
+            border-radius: 15px; 
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            display: none; /* Se activa con la clase .show */
+            grid-template-columns: repeat(4, 1fr); 
+            gap: 8px; 
+            padding: 10px;
+            border: 1px solid #eee;
+            z-index: 10;
+        }
+
+        .sticker-option { 
+            width: 100%; 
+            aspect-ratio: 1; 
+            object-fit: cover; 
+            cursor: pointer; 
+            border-radius: 4px; 
+            transition: 0.2s; 
+        }
+        .sticker-option:hover { 
+            background: #f0f0f0; 
+            transform: scale(1.1); 
+        }
+
+        .show { display: grid !important; }
+    </style>
+</head>
+<body>
+
+<div class="phone-container">
+    <div id="chat-window">
+        </div>
+
+    <div id="sticker-panel"></div>
+
+    <div class="input-area">
+        <button class="sticker-btn" onclick="togglePanel()">✨</button>
+        <div style="flex:1; color:#999; font-size: 14px; padding-left: 10px;">Escribe un mensaje...</div>
+    </div>
+</div>
+
+<script>
+    const panel = document.getElementById('sticker-panel');
+    const chat = document.getElementById('chat-window');
+
+    // CONFIGURACIÓN: Añade aquí tus nombres de archivos con su extensión (.png, .jpg, etc.)
+    const listaStickers = [
+        '1.jpg', '2.jpg', '3.png', '4.jpg', 
+        '5.jpg', '6.jpg', '7.jpg', '8.jpg',
+        '9.jpg', '10.jpg', '11.jpg', '12.jpg',
+        '13.jpg', '14.jpg'
+    ];
+
+    // Función para renderizar los stickers en el panel automáticamente
+    function renderizarPanel() {
+        panel.innerHTML = ''; // Limpiar panel
+        listaStickers.forEach(nombreArchivo => {
+            const img = document.createElement('img');
+            img.src = `stickers/${nombreArchivo}`; // Asegúrate de que la carpeta se llame 'stickers'
+            img.className = 'sticker-option';
+            img.alt = "Sticker";
+            
+            // Evento al hacer clic en el sticker
+            img.onclick = () => sendSticker(img.src);
+            
+            panel.appendChild(img);
+        });
+    }
+
+    function togglePanel() {
+        panel.classList.toggle('show');
+    }
+
+    function sendSticker(src) {
+        const img = document.createElement('img');
+        img.src = src;
+        img.className = 'sticker-msg';
+        
+        chat.appendChild(img);
+        
+        // Scroll automático al último mensaje
+        chat.scrollTop = chat.scrollHeight;
+        
+        // Cerrar panel
+        panel.classList.remove('show');
+    }
+
+    // Cerrar panel si se hace clic fuera del botón o del panel
+    window.onclick = function(event) {
+        if (!event.target.matches('.sticker-btn') && !event.target.closest('#sticker-panel')) {
+            panel.classList.remove('show');
+        }
+    }
+
+    // Inicializar el panel al cargar la página
+    renderizarPanel();
+</script>
+
+</body>
+</html>
