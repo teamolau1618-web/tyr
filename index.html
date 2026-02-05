@@ -92,7 +92,7 @@
             background: var(--panel-bg);
             border-radius: 15px; 
             box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-            display: none; /* Se activa con la clase .show */
+            display: none; 
             grid-template-columns: repeat(4, 1fr); 
             gap: 8px; 
             padding: 10px;
@@ -119,8 +119,7 @@
 <body>
 
 <div class="phone-container">
-    <div id="chat-window">
-        </div>
+    <div id="chat-window"></div>
 
     <div id="sticker-panel"></div>
 
@@ -134,7 +133,11 @@
     const panel = document.getElementById('sticker-panel');
     const chat = document.getElementById('chat-window');
 
-    // CONFIGURACIÓN: Añade aquí tus nombres de archivos con su extensión (.png, .jpg, etc.)
+    /**
+     * RECUERDA: 
+     * 1. La carpeta debe llamarse 'stickers' (todo en minúsculas).
+     * 2. Los archivos deben coincidir exactamente (ej. '1.jpg' no es lo mismo que '1.JPG').
+     */
     const listaStickers = [
         '1.jpg', '2.jpg', '3.png', '4.jpg', 
         '5.jpg', '6.jpg', '7.jpg', '8.jpg',
@@ -142,18 +145,22 @@
         '13.jpg', '14.jpg'
     ];
 
-    // Función para renderizar los stickers en el panel automáticamente
     function renderizarPanel() {
-        panel.innerHTML = ''; // Limpiar panel
+        panel.innerHTML = ''; 
         listaStickers.forEach(nombreArchivo => {
             const img = document.createElement('img');
-            img.src = `stickers/${nombreArchivo}`; // Asegúrate de que la carpeta se llame 'stickers'
+            
+            // Usamos ruta relativa explícita para compatibilidad con GitHub
+            img.src = `./stickers/${nombreArchivo}`; 
             img.className = 'sticker-option';
             img.alt = "Sticker";
             
-            // Evento al hacer clic en el sticker
-            img.onclick = () => sendSticker(img.src);
+            // Si la imagen falla, te avisará en la consola del navegador (F12)
+            img.onerror = () => {
+                console.error(`Error de carga: No se encontró ./stickers/${nombreArchivo}. Revisa mayúsculas/minúsculas.`);
+            };
             
+            img.onclick = () => sendSticker(img.src);
             panel.appendChild(img);
         });
     }
@@ -168,25 +175,19 @@
         img.className = 'sticker-msg';
         
         chat.appendChild(img);
-        
-        // Scroll automático al último mensaje
         chat.scrollTop = chat.scrollHeight;
-        
-        // Cerrar panel
         panel.classList.remove('show');
     }
 
-    // Cerrar panel si se hace clic fuera del botón o del panel
+    // Cerrar panel al hacer clic fuera
     window.onclick = function(event) {
         if (!event.target.matches('.sticker-btn') && !event.target.closest('#sticker-panel')) {
             panel.classList.remove('show');
         }
     }
 
-    // Inicializar el panel al cargar la página
     renderizarPanel();
 </script>
 
 </body>
-
 </html>
