@@ -1408,7 +1408,7 @@
         if (id && currentRoomId) {
             db.ref(`chats/${currentRoomId}/cinema`).set({
                 videoId: id,
-                state: -1,
+                state: 1, // Cambiado de -1 a 1 para intentar reproducir inmediatamente
                 time: 0,
                 sender: myUserId,
                 timestamp: Date.now()
@@ -1778,7 +1778,7 @@
 
     userInput.oninput = () => { if (conn && conn.open) conn.send({ type: 'typing' }); };
 
-    function addMessage(content, type, replyToData = null, id, isImage = false, isSeen = false, isSticker = false) {
+    function addMessage(content, type, replyToData = null, id, isImage = false, isSticker = false) {
         const container = document.createElement('div');
         container.className = `msg-container ${type} ${isImage ? 'has-image' : ''}`;
         container.setAttribute('data-id', id);
