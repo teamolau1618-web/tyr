@@ -1,4 +1,4 @@
-hhhhhhhh
+Por supuesto, aquí tienes el código HTML completo con las correcciones implementadas para los problemas de carga lenta y bucles en la reproducción de YouTube.
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1370,6 +1370,7 @@ hhhhhhhh
     let ytPlayer;
     let isInternalChange = false; // Controla si el cambio en el reproductor es interno (para evitar bucles de Firebase)
     let ytPlayerReadyToInteract = false; // Nuevo flag para saber si el reproductor está listo después de cargar un video.
+    let currentFirebaseVideoId = null; // Track the video ID currently expected from Firebase
 
     let peer, conn, typingTimeout;
     let selectedReplyData = null; // Will store { id, type, content }
@@ -1566,34 +1567,35 @@ hhhhhhhh
     function onYouTubeIframeAPIReady() {
         ytPlayer = new YT.Player('player', {
             events: {
-                'onReady': onPlayerReady, // Añadido: Evento cuando el reproductor está realmente listo
+                'onReady': onPlayerReady, // Evento cuando el reproductor está realmente listo
                 'onStateChange': onPlayerStateChange
             }
         });
     }
 
-    // Nuevo evento: El reproductor está listo para recibir comandos
     function onPlayerReady(event) {
         ytPlayerReadyToInteract = true;
-        // Cuando el reproductor está listo, podemos verificar si hay un video en Firebase para cargar
+        console.log("YouTube Player is Ready!");
+        // Now that the player is ready, check Firebase for the current video to load
         if (currentRoomId) {
             db.ref(`chats/${currentRoomId}/cinema`).once('value').then(snapshot => {
                 const data = snapshot.val();
-                const cinemaNoVideoElement = document.getElementById('cinema-no-video');
-                const playerElement = document.getElementById('player');
-
                 if (data && data.videoId) {
-                    cinemaNoVideoElement.style.display = 'none';
-                    playerElement.style.display = 'block';
-                    // Cargar el video sin sincronizar inmediatamente a Firebase
+                    console.log("Player ready, loading video from Firebase:", data.videoId);
+                    currentFirebaseVideoId = data.videoId; // Set expected video ID
+                    isInternalChange = true; // This load is initiated by Firebase, so mark as internal
                     ytPlayer.loadVideoById(data.videoId, data.time || 0);
-                    if (data.state === YT.PlayerState.PLAYING) ytPlayer.playVideo();
-                    else if (data.state === YT.PlayerState.PAUSED) ytPlayer.pauseVideo();
+                    // No need to play/pause here, onStateChange will handle the final state once loaded
+                    setTimeout(() => isInternalChange = false, 1500); // Give it enough time to load a small part and change state
                 } else {
-                    // Si no hay video en Firebase al iniciar, mostrar placeholder
-                    cinemaNoVideoElement.style.display = 'flex';
-                    playerElement.style.display = 'none';
+                    // No video in Firebase, ensure placeholder is shown
+                    document.getElementById('cinema-no-video').style.display = 'flex';
+                    document.getElementById('player').style.display = 'none';
                 }
+            }).catch(error => {
+                console.error("Error fetching cinema data on player ready:", error);
+                document.getElementById('cinema-no-video').style.display = 'flex';
+                document.getElementById('player').style.display = 'none';
             });
         }
     }
@@ -1608,36 +1610,42 @@ hhhhhhhh
         const url = ytInput.value.trim();
         const id = extractVideoId(url);
         if (id && currentRoomId) {
-            // Asegurarse de que el reproductor está listo antes de cargar
             if (!ytPlayerReadyToInteract) {
                 console.warn("YouTube player not ready yet, cannot load video.");
-                // Opcional: Mostrar un toast al usuario indicando que espere
+                // TODO: Show a toast notification to the user
                 return;
             }
 
+            // The local user wants to load a video.
+            // We push this to Firebase, and the Firebase listener will handle loading it on both sides.
             safeFirebaseSet(`chats/${currentRoomId}/cinema`, {
                 videoId: id,
-                state: YT.PlayerState.PLAYING, // Iniciar reproduciendo por defecto al cargar
+                state: YT.PlayerState.PLAYING, // Assume new video starts playing
                 time: 0,
                 sender: myUserId,
                 timestamp: Date.now()
             });
             ytModal.style.display = 'none';
             ytInput.value = '';
+        } else {
+            // TODO: Show an error toast if ID is invalid
+            console.warn("Invalid YouTube URL or no current room ID.");
         }
     };
 
     function onPlayerStateChange(event) {
-        // Si el cambio es interno (ej. causado por un `loadVideoById` de Firebase), o si no hay sala conectada, no enviamos actualizaciones
+        // If the change is internal (from Firebase command) or no room ID, do not broadcast
         if (isInternalChange || !currentRoomId) {
+            console.log("Internal change or no room, skipping state broadcast.");
             return;
         }
         
         const state = event.data;
         const currentTime = ytPlayer.getCurrentTime();
-
-        // Solo enviamos actualizaciones si el video está reproduciéndose o pausado, o si se ha terminado
+        
+        // We only care about actual playing/paused states, not buffering or unstarted
         if (state === YT.PlayerState.PLAYING || state === YT.PlayerState.PAUSED || state === YT.PlayerState.ENDED) {
+            console.log(`Broadcasting state change: State=${state}, Time=${currentTime}`);
             safeFirebaseUpdate(`chats/${currentRoomId}/cinema`, {
                 state: state,
                 time: currentTime,
@@ -2043,70 +2051,94 @@ hhhhhhhh
             const cinemaNoVideoElement = document.getElementById('cinema-no-video');
             const playerElement = document.getElementById('player');
 
-            // 1. Manejo del Placeholder y la visibilidad del reproductor
             if (!data || !data.videoId || !ytPlayer || !ytPlayerReadyToInteract) {
-                // Si no hay datos de video válidos, o el reproductor no está inicializado/listo,
-                // mostramos el placeholder y ocultamos el reproductor.
+                console.log("No valid cinema data or player not ready. Showing placeholder.");
                 cinemaNoVideoElement.style.display = 'flex';
                 playerElement.style.display = 'none';
                 if (ytPlayer && ytPlayerReadyToInteract && ytPlayer.getPlayerState() !== YT.PlayerState.UNSTARTED) {
-                    ytPlayer.stopVideo(); // Detener cualquier video si lo había
+                    ytPlayer.stopVideo(); // Stop any previous video
                 }
-                return; // Salir de la función si no hay video válido para mostrar/sincronizar
+                currentFirebaseVideoId = null; // Reset expected video ID
+                return;
             }
 
-            // Si hay datos de video válidos, ocultamos el placeholder y mostramos el reproductor.
+            // We have valid video data and player is ready, show player.
             cinemaNoVideoElement.style.display = 'none';
             playerElement.style.display = 'block';
 
-            // 2. Lógica de carga y sincronización del video
-            // Verificamos si el video actual del reproductor es diferente al de Firebase
-            if (ytPlayer.getVideoData().video_id !== data.videoId) {
-                isInternalChange = true; // Indicar que el siguiente cambio es interno
-                ytPlayer.loadVideoById(data.videoId);
+            // Check if it's a new video or a state/time update for the current video
+            if (currentFirebaseVideoId !== data.videoId) {
+                console.log(`Loading NEW video: ${data.videoId} (was ${currentFirebaseVideoId})`);
+                currentFirebaseVideoId = data.videoId; // Update expected video ID
+                isInternalChange = true; // Mark as internal change to avoid broadcasting back
+                ytPlayer.loadVideoById(data.videoId, data.time || 0);
 
-                // Escuchar el cambio de estado *después* de cargar un nuevo video
-                // para saber cuándo está realmente listo para buscar o reproducir.
-                const tempStateChangeListener = (event) => {
-                    // Una vez que el video ha comenzado a reproducirse o está pausado/en buffering,
-                    // podemos aplicar el estado y tiempo de Firebase.
-                    if (event.data === YT.PlayerState.PLAYING || event.data === YT.PlayerState.PAUSED || event.data === YT.PlayerState.BUFFERING) {
+                // Wait for the player to transition from UNSTARTED to a playable state
+                const checkLoadState = setInterval(() => {
+                    const playerState = ytPlayer.getPlayerState();
+                    if (playerState !== YT.PlayerState.UNSTARTED && playerState !== YT.PlayerState.BUFFERING) {
+                        clearInterval(checkLoadState);
+                        console.log(`New video ${data.videoId} loaded. Applying state: ${data.state} at ${data.time}`);
                         ytPlayer.seekTo(data.time, true);
                         if (data.state === YT.PlayerState.PLAYING) ytPlayer.playVideo();
                         else if (data.state === YT.PlayerState.PAUSED) ytPlayer.pauseVideo();
-                        
-                        ytPlayer.removeEventListener('onStateChange', tempStateChangeListener); // Remover este listener temporal
-                        // Después de un breve retraso para que el reproductor se estabilice, permitir actualizaciones externas
-                        setTimeout(() => isInternalChange = false, 1000); 
+                        // Allow a short buffer before releasing isInternalChange
+                        setTimeout(() => isInternalChange = false, 1500);
+                    } else {
+                        console.log(`Still waiting for new video ${data.videoId} to load. Current state: ${playerState}`);
                     }
-                };
-                ytPlayer.addEventListener('onStateChange', tempStateChangeListener);
+                }, 200); // Check every 200ms
 
-                // Fallback por si el evento onStateChange no se dispara como esperamos
+                // Fallback timeout in case checkLoadState fails for some reason
                 setTimeout(() => {
-                    if (isInternalChange) { // Si el flag todavía está activo, forzamos la sincronización
-                        console.warn("Fallback: Sincronizando YouTube por timeout.");
+                    if (isInternalChange) {
+                        console.warn("Fallback: New video load timeout. Forcing sync.");
                         ytPlayer.seekTo(data.time, true);
                         if (data.state === YT.PlayerState.PLAYING) ytPlayer.playVideo();
                         else if (data.state === YT.PlayerState.PAUSED) ytPlayer.pauseVideo();
                         isInternalChange = false;
+                        clearInterval(checkLoadState); // Ensure interval is cleared
                     }
-                }, 5000); // Dar 5 segundos de margen
-                
-            } else {
-                // Si es el mismo video, solo sincronizar el estado y el tiempo
-                if (data.sender !== myUserId) { // Solo si el cambio vino del compañero
-                    isInternalChange = true;
-                    const localTime = ytPlayer.getCurrentTime();
-                    const localState = ytPlayer.getPlayerState();
+                }, 10000); // 10 second fallback
 
-                    // Sincronizar solo si hay una diferencia significativa en el tiempo o en el estado
-                    if (Math.abs(localTime - data.time) > 2 || localState !== data.state) {
-                        ytPlayer.seekTo(data.time, true);
-                        if (data.state === YT.PlayerState.PLAYING) ytPlayer.playVideo();
-                        else if (data.state === YT.PlayerState.PAUSED) ytPlayer.pauseVideo();
+            } else if (data.sender !== myUserId) {
+                // Same video, but update from partner - synchronize state and time
+                const localTime = ytPlayer.getCurrentTime();
+                const localState = ytPlayer.getPlayerState();
+
+                // Only sync if there's a significant difference or state mismatch,
+                // and if the player is not currently loading/buffering
+                if (Math.abs(localTime - data.time) > 2 || localState !== data.state) {
+                    if (localState === YT.PlayerState.BUFFERING || localState === YT.PlayerState.CUED || localState === YT.PlayerState.UNSTARTED) {
+                        console.log("Player is in a transitional state, delaying sync.");
+                        // Re-evaluate after a short delay
+                        setTimeout(() => {
+                            // Re-run the entire Firebase listener logic to re-evaluate
+                            db.ref(`chats/${currentRoomId}/cinema`).once('value').then(latestDataSnapshot => {
+                                const latestData = latestDataSnapshot.val();
+                                if (latestData && latestData.videoId === currentFirebaseVideoId && latestData.sender !== myUserId) {
+                                    console.log("Retrying sync after delay.");
+                                    const updatedLocalTime = ytPlayer.getCurrentTime();
+                                    const updatedLocalState = ytPlayer.getPlayerState();
+                                    if (Math.abs(updatedLocalTime - latestData.time) > 2 || updatedLocalState !== latestData.state) {
+                                        isInternalChange = true;
+                                        ytPlayer.seekTo(latestData.time, true);
+                                        if (latestData.state === YT.PlayerState.PLAYING) ytPlayer.playVideo();
+                                        else if (latestData.state === YT.PlayerState.PAUSED) ytPlayer.pauseVideo();
+                                        setTimeout(() => isInternalChange = false, 500);
+                                    }
+                                }
+                            });
+                        }, 1000); // Check again after 1 second
+                        return; // Exit current listener to prevent premature sync
                     }
-                    setTimeout(() => isInternalChange = false, 500); // Pequeño retraso para re-habilitar actualizaciones
+
+                    console.log(`Syncing state/time for ${data.videoId} from partner.`);
+                    isInternalChange = true;
+                    ytPlayer.seekTo(data.time, true);
+                    if (data.state === YT.PlayerState.PLAYING) ytPlayer.playVideo();
+                    else if (data.state === YT.PlayerState.PAUSED) ytPlayer.pauseVideo();
+                    setTimeout(() => isInternalChange = false, 500);
                 }
             }
         });
@@ -2390,3 +2422,4 @@ hhhhhhhh
 </script>
 </body>
 </html>
+```
