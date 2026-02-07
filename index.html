@@ -1,3 +1,4 @@
+hhhhhhhh
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -558,6 +559,12 @@
             overflow-wrap: break-word;
             transition: margin-bottom 0.2s ease;
         }
+        /* ADDED FOR OFFLINE MESSAGES */
+        .msg-container.pending {
+            opacity: 0.5;
+        }
+        /* END ADDED */
+
         .msg-container.sent { align-self: flex-end; }
         .msg-container.received { align-self: flex-start; }
 
@@ -1225,6 +1232,8 @@
             time: new Date().toISOString(),
             seen: false
         };
+        // ADDED: Display as pending if offline
+        addMessage(msgData.data, 'sent', msgData.replyTo, msgData.id, false, true, !isFirebaseConnected);
         saveMessageToFirebase(msgData);
         stickersPanelWrapper.classList.remove('show'); // Close the panel smoothly
         selectedReplyData = null; // Clear reply
@@ -1266,7 +1275,7 @@
     function startDrawing(e) {
         drawing = true;
         const x = e.clientX || (e.touches && e.touches[0].clientX);
-        const y = e.clientY || (e.touches && e.touches[0].clientY);
+        const y = e.touches && e.touches[0].clientY ? e.touches[0].clientY : e.clientY; // Fix for touch events
         lastX = x;
         lastY = y;
     }
@@ -1279,7 +1288,7 @@
         if (!drawing || !currentRoomId) return;
 
         const x = e.clientX || (e.touches && e.touches[0].clientX);
-        const y = e.clientY || (e.touches && e.touches[0].clientY);
+        const y = e.touches && e.touches[0].clientY ? e.touches[0].clientY : e.clientY; // Fix for touch events
 
         const drawData = {
             x: x / canvas.width, // Normalize coordinates
@@ -1293,11 +1302,12 @@
         };
 
         // Push each stroke point to Firebase
-        db.ref(`chats/${currentRoomId}/drawing/strokes`).push(drawData);
+        safeFirebaseSet(`chats/${currentRoomId}/drawing/strokes/${Date.now()}_${Math.random().toString(36).substring(7)}`, drawData);
         
         // Render locally immediately for instant feedback
         renderStroke(drawData);
         lastX = x;
+        ctx.shadowBlur = 0; // Reset shadow blur immediately after rendering to avoid accumulating
         lastY = y;
     }
 
@@ -1327,7 +1337,7 @@
             ctx.lineTo(x, y);
             ctx.stroke();
         }
-        ctx.shadowBlur = 0;
+        ctx.shadowBlur = 0; // Reset shadow blur after each stroke rendering
     }
 
     canvas.addEventListener('mousedown', startDrawing);
@@ -1349,8 +1359,8 @@
     };
     document.getElementById('btn-clear').onclick = () => {
         if (currentRoomId) {
-            db.ref(`chats/${currentRoomId}/drawing/strokes`).remove(); // Clear all strokes from DB
-            db.ref(`chats/${currentRoomId}/drawing/clearTimestamp`).set(Date.now()); // Send a clear signal
+            safeFirebaseRemove(`chats/${currentRoomId}/drawing/strokes`); // Clear all strokes from DB
+            safeFirebaseSet(`chats/${currentRoomId}/drawing/clearTimestamp`, Date.now()); // Send a clear signal
         }
     };
 
@@ -1358,7 +1368,8 @@
     const ytModal = document.getElementById('youtube-modal');
     const ytInput = document.getElementById('yt-url-input');
     let ytPlayer;
-    let isInternalChange = false;
+    let isInternalChange = false; // Controla si el cambio en el reproductor es interno (para evitar bucles de Firebase)
+    let ytPlayerReadyToInteract = false; // Nuevo flag para saber si el reproductor está listo después de cargar un video.
 
     let peer, conn, typingTimeout;
     let selectedReplyData = null; // Will store { id, type, content }
@@ -1385,6 +1396,169 @@
         avatar: "https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_1280.png" 
     };
 
+    // Global variables for network status and queues
+    let isFirebaseConnected = false;
+    let networkStatus = 'Conectando...'; // Initial status
+    const OFFLINE_QUEUE_KEY = 'shlove_offline_queue';
+
+    // Function to update network status display in the chat header
+    function updateNetworkStatusDisplay() {
+        const statusDot = document.getElementById('status-dot');
+        const headerStatus = document.getElementById('header-status');
+
+        if (!navigator.onLine) {
+            networkStatus = 'Sin internet';
+            statusDot.className = 'status-dot offline';
+        } else if (!isFirebaseConnected) {
+            networkStatus = 'Internet bajo'; // Connected to internet, but not to Firebase
+            statusDot.className = 'status-dot offline';
+        } else {
+            networkStatus = 'En línea';
+            statusDot.className = 'status-dot';
+        }
+        headerStatus.innerText = networkStatus;
+        // Also update connection screen status if it's visible
+        if (connScreen.style.display !== 'none') {
+            statusText.innerText = networkStatus === 'Sin internet' ? 'Sin internet' : 
+                                   networkStatus === 'Internet bajo' ? 'Intentando reconectar...' : 
+                                   'Listo para conectar';
+            if (partnerId && networkStatus === 'En línea') {
+                statusText.innerText = 'Conectando...'; // Override if trying to connect
+            }
+        }
+    }
+
+    // Initial call to set up the network status display
+    updateNetworkStatusDisplay();
+    window.addEventListener('online', updateNetworkStatusDisplay);
+    window.addEventListener('offline', updateNetworkStatusDisplay);
+
+    // Firebase .info/connected listener
+    db.ref('.info/connected').on('value', (snapshot) => {
+        isFirebaseConnected = snapshot.val();
+        updateNetworkStatusDisplay();
+        if (isFirebaseConnected) {
+            processOfflineQueue(); // Process any queued operations
+            if (currentRoomId && myUserId) {
+                // Update my presence to 'En línea' immediately when Firebase reconnects
+                db.ref(`chats/${currentRoomId}/presence/${myUserId}`).set('En línea');
+            }
+        } else {
+            if (currentRoomId && myUserId) {
+                // Explicitly update presence to 'Desconectado' on Firebase if Firebase connection drops
+                db.ref(`chats/${currentRoomId}/presence/${myUserId}`).set('Desconectado');
+            }
+        }
+    });
+
+    // --- OFFLINE QUEUE LOGIC ---
+    function getOfflineQueue() {
+        try {
+            const queue = localStorage.getItem(OFFLINE_QUEUE_KEY);
+            return queue ? JSON.parse(queue) : [];
+        } catch (e) {
+            console.error("Error reading offline queue from localStorage:", e);
+            return [];
+        }
+    }
+
+    function saveOfflineQueue(queue) {
+        try {
+            localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
+        } catch (e) {
+            console.error("Error saving offline queue to localStorage:", e);
+        }
+    }
+
+    function addToOfflineQueue(type, path, data) {
+        const queue = getOfflineQueue();
+        // For cinema updates, only store the latest state to avoid sending outdated commands
+        if (path.includes('/cinema') && type === 'set') { // Only 'set' operations for cinema, as updates merge
+            const existingIndex = queue.findIndex(item => item.path === path && item.type === type);
+            if (existingIndex > -1) {
+                queue[existingIndex].data = data; // Replace with latest data
+            } else {
+                queue.push({ type, path, data, timestamp: Date.now() });
+            }
+        } else {
+            queue.push({ type, path, data, timestamp: Date.now() });
+        }
+        saveOfflineQueue(queue);
+        console.log(`Added to offline queue: ${type} for path ${path}`);
+    }
+
+    async function processOfflineQueue() {
+        if (!isFirebaseConnected) {
+            console.log("Not connected to Firebase, cannot process offline queue.");
+            return;
+        }
+
+        let queue = getOfflineQueue();
+        if (queue.length === 0) {
+            console.log("Offline queue is empty.");
+            return;
+        }
+
+        console.log(`Processing offline queue with ${queue.length} items...`);
+
+        const successfullyProcessedItems = [];
+        for (const item of queue) {
+            try {
+                if (item.type === 'set') {
+                    await db.ref(item.path).set(item.data);
+                    console.log(`Processed SET for ${item.path}`);
+                } else if (item.type === 'update') {
+                    await db.ref(item.path).update(item.data);
+                    console.log(`Processed UPDATE for ${item.path}`);
+                } else if (item.type === 'remove') {
+                    await db.ref(item.path).remove();
+                    console.log(`Processed REMOVE for ${item.path}`);
+                }
+                successfullyProcessedItems.push(item);
+            } catch (error) {
+                console.error(`Failed to process offline item for ${item.path}:`, error);
+                // On failure, keep it in the queue for the next attempt.
+            }
+        }
+
+        // Filter out items that were successfully processed
+        const remainingQueue = queue.filter(item => !successfullyProcessedItems.includes(item));
+        saveOfflineQueue(remainingQueue);
+
+        if (remainingQueue.length === 0) {
+            console.log("All offline queue items processed.");
+        } else {
+            console.warn(`${remainingQueue.length} items remain in offline queue.`);
+        }
+    }
+
+    // Wrapper for Firebase operations
+    function safeFirebaseSet(path, data) {
+        if (isFirebaseConnected) {
+            db.ref(path).set(data);
+        } else {
+            addToOfflineQueue('set', path, data);
+        }
+    }
+
+    function safeFirebaseUpdate(path, data) {
+        if (isFirebaseConnected) {
+            db.ref(path).update(data);
+        } else {
+            addToOfflineQueue('update', path, data);
+        }
+    }
+
+    function safeFirebaseRemove(path) {
+        if (isFirebaseConnected) {
+            db.ref(path).remove();
+        } else {
+            addToOfflineQueue('remove', path, null);
+        }
+    }
+
+    // --- END OFFLINE QUEUE LOGIC ---
+
     // --- LÓGICA YOUTUBE ---
     document.getElementById('btn-open-yt').onclick = () => ytModal.style.display = 'flex';
     document.getElementById('close-yt-modal').onclick = () => ytModal.style.display = 'none';
@@ -1392,9 +1566,36 @@
     function onYouTubeIframeAPIReady() {
         ytPlayer = new YT.Player('player', {
             events: {
+                'onReady': onPlayerReady, // Añadido: Evento cuando el reproductor está realmente listo
                 'onStateChange': onPlayerStateChange
             }
         });
+    }
+
+    // Nuevo evento: El reproductor está listo para recibir comandos
+    function onPlayerReady(event) {
+        ytPlayerReadyToInteract = true;
+        // Cuando el reproductor está listo, podemos verificar si hay un video en Firebase para cargar
+        if (currentRoomId) {
+            db.ref(`chats/${currentRoomId}/cinema`).once('value').then(snapshot => {
+                const data = snapshot.val();
+                const cinemaNoVideoElement = document.getElementById('cinema-no-video');
+                const playerElement = document.getElementById('player');
+
+                if (data && data.videoId) {
+                    cinemaNoVideoElement.style.display = 'none';
+                    playerElement.style.display = 'block';
+                    // Cargar el video sin sincronizar inmediatamente a Firebase
+                    ytPlayer.loadVideoById(data.videoId, data.time || 0);
+                    if (data.state === YT.PlayerState.PLAYING) ytPlayer.playVideo();
+                    else if (data.state === YT.PlayerState.PAUSED) ytPlayer.pauseVideo();
+                } else {
+                    // Si no hay video en Firebase al iniciar, mostrar placeholder
+                    cinemaNoVideoElement.style.display = 'flex';
+                    playerElement.style.display = 'none';
+                }
+            });
+        }
     }
 
     function extractVideoId(url) {
@@ -1407,9 +1608,16 @@
         const url = ytInput.value.trim();
         const id = extractVideoId(url);
         if (id && currentRoomId) {
-            db.ref(`chats/${currentRoomId}/cinema`).set({
+            // Asegurarse de que el reproductor está listo antes de cargar
+            if (!ytPlayerReadyToInteract) {
+                console.warn("YouTube player not ready yet, cannot load video.");
+                // Opcional: Mostrar un toast al usuario indicando que espere
+                return;
+            }
+
+            safeFirebaseSet(`chats/${currentRoomId}/cinema`, {
                 videoId: id,
-                state: -1,
+                state: YT.PlayerState.PLAYING, // Iniciar reproduciendo por defecto al cargar
                 time: 0,
                 sender: myUserId,
                 timestamp: Date.now()
@@ -1420,13 +1628,17 @@
     };
 
     function onPlayerStateChange(event) {
-        if (isInternalChange || !currentRoomId) return;
+        // Si el cambio es interno (ej. causado por un `loadVideoById` de Firebase), o si no hay sala conectada, no enviamos actualizaciones
+        if (isInternalChange || !currentRoomId) {
+            return;
+        }
         
         const state = event.data;
         const currentTime = ytPlayer.getCurrentTime();
 
-        if (state === 1 || state === 2) {
-            db.ref(`chats/${currentRoomId}/cinema`).update({
+        // Solo enviamos actualizaciones si el video está reproduciéndose o pausado, o si se ha terminado
+        if (state === YT.PlayerState.PLAYING || state === YT.PlayerState.PAUSED || state === YT.PlayerState.ENDED) {
+            safeFirebaseUpdate(`chats/${currentRoomId}/cinema`, {
                 state: state,
                 time: currentTime,
                 sender: myUserId,
@@ -1457,7 +1669,13 @@
     document.addEventListener('visibilitychange', () => {
         isWindowFocused = !document.hidden;
         if (currentRoomId) {
-            db.ref(`chats/${currentRoomId}/presence/${myUserId}`).set(isWindowFocused ? 'En línea' : 'Desconectado');
+            // Only update presence to 'En línea' if Firebase is connected.
+            if (isFirebaseConnected) {
+                safeFirebaseSet(`chats/${currentRoomId}/presence/${myUserId}`, isWindowFocused ? 'En línea' : 'Desconectado');
+            } else if (!isWindowFocused) {
+                // If Firebase is not connected and window blurs, queue the offline status.
+                safeFirebaseSet(`chats/${currentRoomId}/presence/${myUserId}`, 'Desconectado');
+            }
             if (isWindowFocused) checkSeen();
         }
     });
@@ -1471,7 +1689,7 @@
             if (messages.length > 0) {
                 const lastMsg = messages[messages.length - 1];
                 const lastId = lastMsg.getAttribute('data-id');
-                db.ref(`chats/${currentRoomId}/messages/${lastId}/seen`).set(true);
+                safeFirebaseSet(`chats/${currentRoomId}/messages/${lastId}/seen`, true);
             }
         }
     }
@@ -1510,8 +1728,9 @@
         myProfileData.nickname = inputNickname.value.trim() || myProfileData.nickname;
         localStorage.setItem('love_chat_profile', JSON.stringify(myProfileData));
         if (currentRoomId) {
-            db.ref(`chats/${currentRoomId}/profiles/${myUserId}`).set(myProfileData);
+            safeFirebaseSet(`chats/${currentRoomId}/profiles/${myUserId}`, myProfileData);
         }
+        // REMOVED: updateMyProfileUI(); // Update local UI immediately (Point 1 Fix)
         profileModal.style.display = 'none';
         // Ensure the toast is reset before showing it
         toast.innerHTML = '<i class="fa-solid fa-circle-check"></i> Perfil actualizado con éxito';
@@ -1540,7 +1759,7 @@
 
     function saveMessageToFirebase(msgData) {
         if (currentRoomId) {
-            db.ref(`chats/${currentRoomId}/messages/${msgData.id}`).set(msgData);
+            safeFirebaseSet(`chats/${currentRoomId}/messages/${msgData.id}`, msgData);
         }
     }
 
@@ -1558,6 +1777,8 @@
                 time: new Date().toISOString(),
                 seen: false
             };
+            // ADDED: Display as pending if offline
+            addMessage(msgData.data, 'sent', msgData.replyTo, msgData.id, true, false, !isFirebaseConnected);
             saveMessageToFirebase(msgData);
             selectedReplyData = null;
             replyPreview.style.display = 'none';
@@ -1583,20 +1804,58 @@
             myIdDisplay.innerText = id;
             localStorage.setItem('love_my_peer_id', id);
             myUserId = id; // Update the global myUserId once peer is open
-            if (partnerId) connectToPartner(partnerId);
+
+            // If a partnerId exists from localStorage, attempt to immediately show chat UI
+            if (partnerId && myUserId !== partnerId) {
+                // Hide connection screen and show chat elements immediately
+                connScreen.style.opacity = '0';
+                setTimeout(() => {
+                    connScreen.style.display = 'none';
+                    chatCard.style.display = 'flex';
+                    cinemaContainer.style.display = 'flex';
+                    toolsPanel.style.display = 'flex';
+                    currentRoomId = [myUserId, partnerId].sort().join('_');
+                    startFirebaseListeners(currentRoomId);
+                    // Send my profile data and presence as soon as Firebase is connected or queue it
+                    safeFirebaseSet(`chats/${currentRoomId}/profiles/${myUserId}`, myProfileData);
+                    safeFirebaseSet(`chats/${currentRoomId}/presence/${myUserId}`, 'En línea');
+                    updateNetworkStatusDisplay(); // Update status based on current network state
+                    connectToPartner(partnerId); // Attempt PeerJS connection in background
+                }, 500);
+            } else if (myUserId === partnerId) {
+                // Prevent self-connection issue if somehow peerId and partnerId are the same
+                localStorage.removeItem('love_partner_id');
+                partnerId = null;
+                statusText.innerText = "No puedes conectar contigo mismo.";
+                updateNetworkStatusDisplay();
+            }
         });
 
         peer.on('connection', (connection) => { 
             conn = connection; 
             partnerId = conn.peer;
             localStorage.setItem('love_partner_id', partnerId);
-            setupChatUI(); 
+            // If the UI is already showing the chat (due to previous session restore),
+            // just ensure listeners are active and presence is updated.
+            if (chatCard.style.display === 'flex') {
+                currentRoomId = [myUserId, partnerId].sort().join('_');
+                startFirebaseListeners(currentRoomId); // Re-establish if needed
+                safeFirebaseSet(`chats/${currentRoomId}/profiles/${myUserId}`, myProfileData);
+                safeFirebaseSet(`chats/${currentRoomId}/presence/${myUserId}`, 'En línea');
+                updateNetworkStatusDisplay();
+            } else {
+                setupChatUI(); // Otherwise, proceed with normal UI setup
+            }
         });
 
         myIdDisplay.onclick = () => { 
             navigator.clipboard.writeText(myIdDisplay.innerText); 
-            statusText.innerText = "¡Código copiado!";
-            setTimeout(() => statusText.innerText = "Listo para conectar", 2000); // Give feedback
+            toast.innerHTML = '<i class="fa-solid fa-clipboard-check"></i> ID Copiado!';
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+                toast.innerHTML = '<i class="fa-solid fa-circle-check"></i> Perfil actualizado con éxito';
+            }, 3000);
         };
     }
 
@@ -1606,14 +1865,34 @@
         conn.on('open', () => {
             partnerId = rid;
             localStorage.setItem('love_partner_id', rid);
-            setupChatUI();
+            // If the UI is already set up (from localStorage), this just confirms PeerJS connection.
+            if (chatCard.style.display !== 'flex') {
+                setupChatUI();
+            } else {
+                // PeerJS connected, ensure typing indicators work
+                if (conn) {
+                    conn.on('data', (data) => {
+                        if (data.type === 'typing') {
+                            typingBubble.style.display = 'block';
+                            scrollToBottom();
+                            clearTimeout(typingTimeout);
+                            typingTimeout = setTimeout(() => typingBubble.style.display = 'none', 2000);
+                        }
+                    });
+                }
+            }
+        });
+        conn.on('error', (err) => {
+            console.error("PeerJS connection error:", err);
+            statusText.innerText = "Error al conectar, ID incorrecto o no disponible.";
+            updateNetworkStatusDisplay();
+        });
+        conn.on('close', () => {
+            console.log("PeerJS connection closed.");
+            statusText.innerText = "Conexión PeerJS perdida.";
+            updateNetworkStatusDisplay();
         });
     }
-
-    connectBtn.onclick = () => {
-        const rid = remoteIdInput.value.trim();
-        if (rid) connectToPartner(rid);
-    };
 
     function setupChatUI() {
         currentRoomId = [myUserId, partnerId].sort().join('_'); // Use myUserId here
@@ -1624,21 +1903,29 @@
             cinemaContainer.style.display = 'flex';
             toolsPanel.style.display = 'flex';
             startFirebaseListeners(currentRoomId);
-            db.ref(`chats/${currentRoomId}/profiles/${myUserId}`).set(myProfileData); // Use myUserId here
-            db.ref(`chats/${currentRoomId}/presence/${myUserId}`).set('En línea'); // Use myUserId here
+            safeFirebaseSet(`chats/${currentRoomId}/profiles/${myUserId}`, myProfileData); // Use myUserId here
+            safeFirebaseSet(`chats/${currentRoomId}/presence/${myUserId}`, 'En línea'); // Use myUserId here
+            updateNetworkStatusDisplay(); // Ensure status is updated
         }, 500);
 
-        conn.on('data', (data) => {
-            if (data.type === 'typing') {
-                typingBubble.style.display = 'block';
-                scrollToBottom();
-                clearTimeout(typingTimeout);
-                typingTimeout = setTimeout(() => typingBubble.style.display = 'none', 2000);
-            }
-        });
+        if (conn) { // conn might not be immediately available if PeerJS connection is async
+            conn.on('data', (data) => {
+                if (data.type === 'typing') {
+                    typingBubble.style.display = 'block';
+                    scrollToBottom();
+                    clearTimeout(typingTimeout);
+                    typingTimeout = setTimeout(() => typingBubble.style.display = 'none', 2000);
+                }
+            });
+        }
     }
 
     function startFirebaseListeners(roomId) {
+        // Clear previous message listeners to avoid duplicates on reload/reconnect
+        db.ref(`chats/${roomId}/messages`).off('value');
+        db.ref(`chats/${roomId}/messages`).off('child_changed');
+        db.ref(`chats/${roomId}/messages`).off('child_removed');
+
         db.ref(`chats/${roomId}/messages`).on('value', (snapshot) => {
             const messages = snapshot.val();
             const existingIds = Array.from(document.querySelectorAll('.msg-container')).map(el => el.getAttribute('data-id'));
@@ -1647,17 +1934,36 @@
                 Object.values(messages).sort((a,b) => new Date(a.time) - new Date(b.time)).forEach(m => {
                     const type = m.sender === myUserId ? 'sent' : 'received';
                     if (!existingIds.includes(m.id.toString())) {
-                        addMessage(m.type === 'chat' ? m.text : m.data, type, m.replyTo, m.id, m.type === 'image', m.seen, m.type === 'sticker');
+                        addMessage(m.type === 'chat' ? m.text : m.data, type, m.replyTo, m.id, m.type === 'image', m.type === 'sticker', false, m.seen); // Added isPending = false
                         if (type === 'received') receiveSound.play();
-                        else sendSound.play();
+                        // sendSound.play() is handled in sendBtn.onclick for sent messages
                         // Aplicar reacción si ya existe al cargar historial
                         if (m.reaction) toggleHeart(m.id, false, true);
                     } else {
+                        // This block now handles updates for already existing messages,
+                        // including our pending messages when confirmed by Firebase.
                         const msgEl = document.querySelector(`[data-id="${m.id}"]`);
                         if (msgEl) {
+                            // If it was a pending message, remove the pending class
+                            if (msgEl.classList.contains('pending')) {
+                                msgEl.classList.remove('pending');
+                                if (m.sender === myUserId) sendSound.play(); // Play send sound when confirmed
+                            }
+
                             if (m.seen) {
                                 const status = msgEl.querySelector('.msg-status-outer');
                                 if (status) status.innerHTML = 'Visto';
+                            } else { // If not seen yet, ensure loading ring for sent, or clear for others
+                                const status = msgEl.querySelector('.msg-status-outer');
+                                if (status && m.sender === myUserId && !m.seen) {
+                                    status.innerHTML = '<div class="loading-ring"></div>';
+									
+									setTimeout(() => {
+                                        if (status.innerHTML.includes('loading-ring')) {
+                                            status.innerHTML = ''; 
+                                        }
+                                    }, 1000);
+                                }
                             }
                             if (m.type === 'chat') {
                                 const textEl = msgEl.querySelector('.msg-text');
@@ -1671,6 +1977,7 @@
                     }
                 });
                 checkSeen();
+                scrollToBottom(); // Ensure scroll to bottom after all messages are processed.
             }
         });
 
@@ -1733,26 +2040,74 @@
         // Listener de Cine (YouTube)
         db.ref(`chats/${roomId}/cinema`).on('value', (snapshot) => {
             const data = snapshot.val();
-            if (!data || !ytPlayer) return;
+            const cinemaNoVideoElement = document.getElementById('cinema-no-video');
+            const playerElement = document.getElementById('player');
 
-            document.getElementById('cinema-no-video').style.display = 'none';
-            document.getElementById('player').style.display = 'block';
-
-            if (data.videoId && ytPlayer.getVideoData && ytPlayer.getVideoData().video_id !== data.videoId) {
-                isInternalChange = true;
-                ytPlayer.loadVideoById(data.videoId);
-                setTimeout(() => isInternalChange = false, 1000);
+            // 1. Manejo del Placeholder y la visibilidad del reproductor
+            if (!data || !data.videoId || !ytPlayer || !ytPlayerReadyToInteract) {
+                // Si no hay datos de video válidos, o el reproductor no está inicializado/listo,
+                // mostramos el placeholder y ocultamos el reproductor.
+                cinemaNoVideoElement.style.display = 'flex';
+                playerElement.style.display = 'none';
+                if (ytPlayer && ytPlayerReadyToInteract && ytPlayer.getPlayerState() !== YT.PlayerState.UNSTARTED) {
+                    ytPlayer.stopVideo(); // Detener cualquier video si lo había
+                }
+                return; // Salir de la función si no hay video válido para mostrar/sincronizar
             }
 
-            if (data.sender !== myUserId) {
-                isInternalChange = true;
-                const localTime = ytPlayer.getCurrentTime();
-                if (Math.abs(localTime - data.time) > 2) {
-                    ytPlayer.seekTo(data.time);
+            // Si hay datos de video válidos, ocultamos el placeholder y mostramos el reproductor.
+            cinemaNoVideoElement.style.display = 'none';
+            playerElement.style.display = 'block';
+
+            // 2. Lógica de carga y sincronización del video
+            // Verificamos si el video actual del reproductor es diferente al de Firebase
+            if (ytPlayer.getVideoData().video_id !== data.videoId) {
+                isInternalChange = true; // Indicar que el siguiente cambio es interno
+                ytPlayer.loadVideoById(data.videoId);
+
+                // Escuchar el cambio de estado *después* de cargar un nuevo video
+                // para saber cuándo está realmente listo para buscar o reproducir.
+                const tempStateChangeListener = (event) => {
+                    // Una vez que el video ha comenzado a reproducirse o está pausado/en buffering,
+                    // podemos aplicar el estado y tiempo de Firebase.
+                    if (event.data === YT.PlayerState.PLAYING || event.data === YT.PlayerState.PAUSED || event.data === YT.PlayerState.BUFFERING) {
+                        ytPlayer.seekTo(data.time, true);
+                        if (data.state === YT.PlayerState.PLAYING) ytPlayer.playVideo();
+                        else if (data.state === YT.PlayerState.PAUSED) ytPlayer.pauseVideo();
+                        
+                        ytPlayer.removeEventListener('onStateChange', tempStateChangeListener); // Remover este listener temporal
+                        // Después de un breve retraso para que el reproductor se estabilice, permitir actualizaciones externas
+                        setTimeout(() => isInternalChange = false, 1000); 
+                    }
+                };
+                ytPlayer.addEventListener('onStateChange', tempStateChangeListener);
+
+                // Fallback por si el evento onStateChange no se dispara como esperamos
+                setTimeout(() => {
+                    if (isInternalChange) { // Si el flag todavía está activo, forzamos la sincronización
+                        console.warn("Fallback: Sincronizando YouTube por timeout.");
+                        ytPlayer.seekTo(data.time, true);
+                        if (data.state === YT.PlayerState.PLAYING) ytPlayer.playVideo();
+                        else if (data.state === YT.PlayerState.PAUSED) ytPlayer.pauseVideo();
+                        isInternalChange = false;
+                    }
+                }, 5000); // Dar 5 segundos de margen
+                
+            } else {
+                // Si es el mismo video, solo sincronizar el estado y el tiempo
+                if (data.sender !== myUserId) { // Solo si el cambio vino del compañero
+                    isInternalChange = true;
+                    const localTime = ytPlayer.getCurrentTime();
+                    const localState = ytPlayer.getPlayerState();
+
+                    // Sincronizar solo si hay una diferencia significativa en el tiempo o en el estado
+                    if (Math.abs(localTime - data.time) > 2 || localState !== data.state) {
+                        ytPlayer.seekTo(data.time, true);
+                        if (data.state === YT.PlayerState.PLAYING) ytPlayer.playVideo();
+                        else if (data.state === YT.PlayerState.PAUSED) ytPlayer.pauseVideo();
+                    }
+                    setTimeout(() => isInternalChange = false, 500); // Pequeño retraso para re-habilitar actualizaciones
                 }
-                if (data.state === 1) ytPlayer.playVideo();
-                if (data.state === 2) ytPlayer.pauseVideo();
-                setTimeout(() => isInternalChange = false, 500);
             }
         });
 
@@ -1767,21 +2122,37 @@
                 headerAvatar.src = data.avatar;
                 headerName.innerText = data.name;
                 headerNickname.innerText = data.nickname;
+            } else {
+                // If partner profile isn't available, set to default/placeholder
+                headerAvatar.src = "https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_1280.png";
+                headerName.innerText = "Desconocido";
+                headerNickname.innerText = "Nueva cuenta";
             }
         });
 
         db.ref(`chats/${roomId}/presence/${partnerId}`).on('value', (snapshot) => {
             const status = snapshot.val() || 'Desconectado';
-            headerStatus.innerText = status;
-            statusDot.className = `status-dot ${status === 'En línea' ? '' : 'offline'}`;
+            // Only update partner's status, not our own internal network status
+            const partnerStatusText = document.querySelector('#header-profile .user-info .status-text');
+            if (partnerStatusText) {
+                partnerStatusText.innerText = status;
+            }
+            // Update partner's dot
+            const partnerStatusDot = document.querySelector('#header-profile #status-dot');
+            if (partnerStatusDot) {
+                partnerStatusDot.className = `status-dot ${status === 'En línea' ? '' : 'offline'}`;
+            }
         });
     }
 
     userInput.oninput = () => { if (conn && conn.open) conn.send({ type: 'typing' }); };
 
-    function addMessage(content, type, replyToData = null, id, isImage = false, isSeen = false, isSticker = false) {
+    function addMessage(content, type, replyToData = null, id, isImage = false, isSticker = false, isPending = false, isSeen = false) { // MODIFIED: Added isPending
         const container = document.createElement('div');
         container.className = `msg-container ${type} ${isImage ? 'has-image' : ''}`;
+        if (isPending) { // ADDED: Apply pending class for ghost messages
+            container.classList.add('pending');
+        }
         container.setAttribute('data-id', id);
         container.setAttribute('data-type', isSticker ? 'sticker' : (isImage ? 'image' : 'chat'));
         container.setAttribute('data-content', content); // Store actual content (text or URL)
@@ -1810,7 +2181,11 @@
             }
         }
         
-        let statusContent = (type === 'sent') ? (isSeen ? 'Visto' : '<div class="loading-ring"></div>') : '';
+        // MODIFIED: Status content logic for pending messages
+        let statusContent = '';
+        if (type === 'sent') {
+            statusContent = isSeen ? 'Visto' : '<div class="loading-ring"></div>';
+        }
 
         container.innerHTML = `
             <i class="fa-solid fa-ellipsis-vertical msg-menu-btn" onclick="openMsgOptions('${id}')"></i>
@@ -1836,12 +2211,7 @@
              twemoji.parse(replyContentElement);
         }
 
-        if(type === 'sent' && !isSeen) {
-            setTimeout(() => {
-                const outer = container.querySelector('.msg-status-outer');
-                if (outer && outer.querySelector('.loading-ring')) outer.innerHTML = '';
-            }, 2000);
-        }
+        // REMOVED: The timeout for loading ring removal as this will be handled by Firebase's child_changed listener
         scrollToBottom();
     }
 
@@ -1902,7 +2272,7 @@
     function handleDblClick(e, id) {
         const heart = document.querySelector(`[data-id="${id}"] .heart-reaction`);
         const newState = !heart.classList.contains('active');
-        db.ref(`chats/${currentRoomId}/messages/${id}/reaction`).set(newState);
+        safeFirebaseSet(`chats/${currentRoomId}/messages/${id}/reaction`, newState);
         
         if(newState) {
             likeSound.play();
@@ -1934,7 +2304,7 @@
     document.querySelector('.close-lightbox').onclick = () => lightbox.style.display = 'none';
 
     window.deleteMessage = (id) => {
-        if (currentRoomId) db.ref(`chats/${currentRoomId}/messages/${id}`).remove();
+        if (currentRoomId) safeFirebaseRemove(`chats/${currentRoomId}/messages/${id}`);
     };
 
     window.prepareReply = (id, type, content) => {
@@ -1976,7 +2346,7 @@
         if (!currentRoomId) return;
 
         if (editingMessageId) {
-            db.ref(`chats/${currentRoomId}/messages/${editingMessageId}`).update({ text: t });
+            safeFirebaseUpdate(`chats/${currentRoomId}/messages/${editingMessageId}`, { text: t });
             editingMessageId = null;
         } else {
             const msgId = Date.now();
@@ -1984,6 +2354,8 @@
                 type: 'chat', text: t, replyTo: selectedReplyData, id: msgId, 
                 sender: myUserId, time: new Date().toISOString(), seen: false
             };
+            // ADDED: Display as pending if offline
+            addMessage(msgData.text, 'sent', msgData.replyTo, msgData.id, false, false, !isFirebaseConnected);
             saveMessageToFirebase(msgData);
             selectedReplyData = null;
         }
@@ -1995,8 +2367,24 @@
 
     document.getElementById('btn-new-chat').onclick = () => {
         const newRid = document.getElementById('new-remote-id').value.trim();
-        if (newRid) { localStorage.setItem('love_partner_id', newRid); location.reload(); }
+        if (newRid && myUserId !== newRid) { localStorage.setItem('love_partner_id', newRid); location.reload(); }
+        else if (newRid === myUserId) {
+            toast.innerHTML = '<i class="fa-solid fa-xmark"></i> No puedes conectar contigo mismo.';
+            toast.classList.add('show');
+            toast.style.background = 'var(--offline-red)';
+            setTimeout(() => {
+                toast.classList.remove('show');
+                toast.style.background = 'rgba(46, 204, 113, 0.9)'; // Reset to success green
+            }, 3000);
+        }
     };
+
+    function updateMyProfileUI() {
+        // This function is for showing *our own* profile in the modal for editing.
+        // It should NOT update the chat header as the chat header is for the PARTNER's profile.
+        // The display in the header is handled by the Firebase listener for profiles.
+    }
+    // REMOVED: updateMyProfileUI(); // Call on load to display current user's profile (Point 1 Fix)
 
     initPeer();
 </script>
