@@ -1,11 +1,11 @@
---- START OF FILEeeeeeeeeeeeeeee text/html ---
+--- STARttttttttttT OF FILE text/html ---
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ShLove | ¡Chat with your soulmate!</title>
-	<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><path fill='%23f72585' d='M47.6 300.4L228.3 469.1c7.5 7 17.4 10.9 27.7 10.9s20.2-3.9 27.7-10.9L464.4 300.4c30.4-28.3 47.6-68 47.6-109.5v-5.8c0-69.9-50.5-129.5-119.4-141C347 36.5 300.6 51.4 268 84L256 96 244 84c-32.6-32.6-79-47.5-124.6-39.9C50.5 55.6 0 115.2 0 185.1v5.8c0 41.5 17.2 81.2 47.6 109.5z'/></svg取り付けました。">
+	<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><path fill='%23f72585' d='M47.6 300.4L228.3 469.1c7.5 7 17.4 10.9 27.7 10.9s20.2-3.9 27.7-10.9L464.4 300.4c30.4-28.3 47.6-68 47.6-109.5v-5.8c0-69.9-50.5-129.5-119.4-141C347 36.5 300.6 51.4 268 84L256 96 244 84c-32.6-32.6-79-47.5-124.6-39.9C50.5 55.6 0 115.2 0 185.1v5.8c0 41.5 17.2 81.2 47.6 109.5z'/></svg>">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
@@ -1307,7 +1307,6 @@
         // Render locally immediately for instant feedback
         renderStroke(drawData);
         lastX = x;
-        ctx.shadowBlur = 0; // Clear shadow after each stroke
         lastY = y;
     }
 
@@ -1369,6 +1368,8 @@
     const ytInput = document.getElementById('yt-url-input');
     let ytPlayer;
     let isInternalChange = false;
+    let isYouTubeApiReady = false; // NEW: Flag to check if YouTube API is fully ready
+    let pendingCinemaData = null; // NEW: Stores cinema data if API isn't ready yet
 
     let peer, conn, typingTimeout;
     let selectedReplyData = null; // Will store { id, type, content }
@@ -1568,6 +1569,12 @@
                 'onStateChange': onPlayerStateChange
             }
         });
+        isYouTubeApiReady = true; // Set flag to true once API is ready
+        // If there's any pending cinema data, process it now
+        if (pendingCinemaData && currentRoomId) {
+            processCinemaData(pendingCinemaData);
+            pendingCinemaData = null; // Clear after processing
+        }
     }
 
     function extractVideoId(url) {
@@ -1579,26 +1586,81 @@
     document.getElementById('load-yt-video').onclick = () => {
         const url = ytInput.value.trim();
         const id = extractVideoId(url);
-        if (id && currentRoomId) {
-            safeFirebaseSet(`chats/${currentRoomId}/cinema`, {
-                videoId: id,
-                state: -1,
-                time: 0,
-                sender: myUserId,
-                timestamp: Date.now()
-            });
-            ytModal.style.display = 'none';
-            ytInput.value = '';
+        if (currentRoomId) {
+            if (id) {
+                safeFirebaseSet(`chats/${currentRoomId}/cinema`, {
+                    videoId: id,
+                    state: -1, // -1 means unstarted
+                    time: 0,
+                    sender: myUserId,
+                    timestamp: Date.now()
+                });
+                ytModal.style.display = 'none';
+                ytInput.value = '';
+            } else {
+                alert('Por favor, ingresa una URL de YouTube válida.'); // Alert for invalid URL
+            }
         }
     };
 
+    // NEW: Function to process cinema data, ensuring player is ready
+    function processCinemaData(data) {
+        if (!data || !ytPlayer || !isYouTubeApiReady) return; // Ensure API and player are ready
+
+        document.getElementById('cinema-no-video').style.display = 'none';
+        document.getElementById('player').style.display = 'block';
+
+        if (data.videoId) {
+            const currentVideoId = ytPlayer.getVideoData ? ytPlayer.getVideoData().video_id : null;
+
+            if (currentVideoId !== data.videoId) {
+                isInternalChange = true;
+                ytPlayer.loadVideoById(data.videoId);
+                
+                // Attach a temporary 'onReady' listener to the player instance
+                // to handle seeking and state after the *new* video has loaded.
+                const tempOnReadyListener = (event) => {
+                    // Check if player state is anything other than UNSTARTED or CUED (which means video is loaded)
+                    if (ytPlayer.getPlayerState() !== YT.PlayerState.UNSTARTED && ytPlayer.getPlayerState() !== YT.PlayerState.CUED) {
+                        ytPlayer.seekTo(data.time, true);
+                        if (data.state === 1) ytPlayer.playVideo();
+                        else if (data.state === 2) ytPlayer.pauseVideo();
+                        ytPlayer.removeEventListener('onReady', tempOnReadyListener); // Remove self after execution
+                        setTimeout(() => isInternalChange = false, 1000); // Allow some time for player to settle
+                    }
+                };
+                ytPlayer.addEventListener('onReady', tempOnReadyListener);
+
+            } else if (data.sender !== myUserId) {
+                // Same video, sync time and state from partner if not from us
+                isInternalChange = true;
+                const localTime = ytPlayer.getCurrentTime();
+                // Only sync if significant time difference or state mismatch
+                if (Math.abs(localTime - data.time) > 2 || ytPlayer.getPlayerState() !== data.state) {
+                    ytPlayer.seekTo(data.time, true);
+                    if (data.state === 1) ytPlayer.playVideo();
+                    else if (data.state === 2) ytPlayer.pauseVideo();
+                }
+                setTimeout(() => isInternalChange = false, 500);
+            }
+        } else {
+            // No videoId in Firebase, or videoId was removed, display placeholder
+            document.getElementById('cinema-no-video').style.display = 'flex';
+            document.getElementById('player').style.display = 'none';
+            if (ytPlayer && typeof ytPlayer.stopVideo === 'function' && ytPlayer.getPlayerState() !== YT.PlayerState.UNSTARTED) {
+                ytPlayer.stopVideo(); // Ensure player is stopped if a video was playing
+            }
+        }
+    }
+
     function onPlayerStateChange(event) {
-        if (isInternalChange || !currentRoomId) return;
+        if (isInternalChange || !currentRoomId || !ytPlayer || !isYouTubeApiReady) return; // Added ytPlayer and isYouTubeApiReady checks
         
         const state = event.data;
         const currentTime = ytPlayer.getCurrentTime();
 
-        if (state === 1 || state === 2) {
+        // Only send updates if playing or paused
+        if (state === YT.PlayerState.PLAYING || state === YT.PlayerState.PAUSED) {
             safeFirebaseUpdate(`chats/${currentRoomId}/cinema`, {
                 state: state,
                 time: currentTime,
@@ -2001,38 +2063,11 @@
         // Listener de Cine (YouTube)
         db.ref(`chats/${roomId}/cinema`).on('value', (snapshot) => {
             const data = snapshot.val();
-            if (!data || !ytPlayer) return;
-
-            document.getElementById('cinema-no-video').style.display = 'none';
-            document.getElementById('player').style.display = 'block';
-
-            if (data.videoId && ytPlayer.getVideoData && ytPlayer.getVideoData().video_id !== data.videoId) {
-                isInternalChange = true;
-                ytPlayer.loadVideoById(data.videoId);
-                // Ensure player is ready before seeking
-                const checkReady = setInterval(() => {
-                    if (ytPlayer.getPlayerState() !== -1) { // -1 means unstarted
-                        ytPlayer.seekTo(data.time, true);
-                        if (data.state === 1) ytPlayer.playVideo();
-                        if (data.state === 2) ytPlayer.pauseVideo();
-                        clearInterval(checkReady);
-                    }
-                }, 100); // Check every 100ms
-                setTimeout(() => isInternalChange = false, 1000); // Give time for load and seek
-            } else if (data.videoId && ytPlayer.getVideoData && ytPlayer.getVideoData().video_id === data.videoId) {
-                // If same video, just sync time and state
-                if (data.sender !== myUserId) {
-                    isInternalChange = true;
-                    const localTime = ytPlayer.getCurrentTime();
-                    // Only sync if significant difference or state mismatch
-                    if (Math.abs(localTime - data.time) > 2 || ytPlayer.getPlayerState() !== data.state) {
-                        ytPlayer.seekTo(data.time, true);
-                        if (data.state === 1) ytPlayer.playVideo();
-                        else if (data.state === 2) ytPlayer.pauseVideo();
-                    }
-                    setTimeout(() => isInternalChange = false, 500);
-                }
+            if (!isYouTubeApiReady) {
+                pendingCinemaData = data; // Store for later if API not ready
+                return;
             }
+            processCinemaData(data); // Process immediately if API is ready
         });
 
         db.ref(`chats/${roomId}/messages`).on('child_removed', (snapshot) => {
