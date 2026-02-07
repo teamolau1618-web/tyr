@@ -1,3 +1,4 @@
+hiiiiiiiii
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -604,9 +605,7 @@
             font-size: 10px;
             opacity: 0.7;
             border-left: 2px solid var(--soft-pink);
-            display: flex;
-            align-items: center;
-            gap: 5px; /* Added gap for reply content */
+            display: block;
         }
 
         .msg-menu-btn {
@@ -944,6 +943,7 @@
         </button>
     </div>
     <div id="video-placeholder">
+        <div id="player"></div> <!-- Se añadió este div para el reproductor de YouTube -->
         <div id="cinema-no-video" style="color:rgba(255,255,255,0.4); font-size: 11px; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; position: absolute; top: 0; left: 0; padding: 0;">
             <i class="fa-solid fa-film" style="font-size: 35px; display: block; margin-bottom: 12px; filter: drop-shadow(0 0 10px rgba(255,255,255,0.2));"></i>
             <span style="line-height: 1.4; display: block; width: 100%;">Elige un video<br>para empezar<br>la magia</span>
@@ -1023,11 +1023,6 @@
         <input type="text" id="input-nickname" class="modal-input" placeholder="Nuevo apodo...">
         
         <hr style="border: 0; border-top: 1px solid var(--glass-border); margin: 15px 0;">
-        <div style="display:flex; gap:10px; margin-top: 15px;">
-            <button class="btn-modal btn-save" id="copy-my-id-btn" style="width: 100%;">
-                <i class="fa-solid fa-copy"></i> Copiar mi ID
-            </button>
-        </div>
         <p style="font-size: 10px; color: var(--soft-pink); margin-bottom: 8px;">NUEVO CHAT</p>
         <input type="text" id="new-remote-id" class="modal-input" placeholder="Pegar código nuevo...">
         <button class="btn-modal" id="btn-new-chat" style="background: var(--love-gradient); color: white; margin-bottom: 15px; width: 100%;">
@@ -1219,15 +1214,12 @@
             type: 'sticker',
             data: path,
             id: msgId,
-            replyTo: selectedReplyData, // Use selectedReplyData here
-            sender: myUserId,
+            sender: peer.id, // Se mantuvo como peer.id según la instrucción de no tocar salvo YouTube y typing bubble
             time: new Date().toISOString(),
             seen: false
         };
         saveMessageToFirebase(msgData);
         stickersPanelWrapper.classList.remove('show'); // Close the panel smoothly
-        selectedReplyData = null; // Clear reply
-        replyPreview.style.display = 'none'; // Hide reply preview
     }
 
     function enviarEmoji(emoji) {
@@ -1259,8 +1251,8 @@
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
     }
-    // No initial resizeCanvas call here. It will be called in startFirebaseListeners
-    // and when the window resizes, it will re-render all strokes.
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
 
     function startDrawing(e) {
         drawing = true;
@@ -1281,49 +1273,39 @@
         const y = e.clientY || (e.touches && e.touches[0].clientY);
 
         const drawData = {
-            x: x / canvas.width, // Normalize coordinates
-            y: y / canvas.height,
-            prevX: lastX / canvas.width,
-            prevY: lastY / canvas.height,
+            x: x,
+            y: y,
+            prevX: lastX,
+            prevY: lastY,
             color: currentMode === 'eraser' ? 'eraser' : colorPicker.value,
             mode: currentMode,
-            timestamp: Date.now(), // Add timestamp for order
-            sender: myUserId
+            sender: peer.id
         };
 
-        // Push each stroke point to Firebase
-        db.ref(`chats/${currentRoomId}/drawing/strokes`).push(drawData);
-        
-        // Render locally immediately for instant feedback
+        db.ref(`chats/${currentRoomId}/drawing`).set(drawData);
         renderStroke(drawData);
         lastX = x;
         lastY = y;
     }
 
     function renderStroke(data) {
-        // Convert normalized coordinates back to actual canvas coordinates
-        const x = data.x * canvas.width;
-        const y = data.y * canvas.height;
-        const prevX = data.prevX * canvas.width;
-        const prevY = data.prevY * canvas.height;
-
         ctx.lineWidth = data.mode === 'eraser' ? 30 : 5;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
 
         ctx.beginPath();
-        ctx.moveTo(prevX, prevY);
+        ctx.moveTo(data.prevX, data.prevY);
 
         if (data.mode === 'eraser') {
             ctx.globalCompositeOperation = 'destination-out';
-            ctx.lineTo(x, y);
+            ctx.lineTo(data.x, data.y);
             ctx.stroke();
         } else {
             ctx.globalCompositeOperation = 'source-over';
             ctx.strokeStyle = data.color;
             ctx.shadowBlur = 15;
             ctx.shadowColor = data.color;
-            ctx.lineTo(x, y);
+            ctx.lineTo(data.x, data.y);
             ctx.stroke();
         }
         ctx.shadowBlur = 0;
@@ -1347,10 +1329,7 @@
         document.getElementById('btn-brush').classList.remove('active');
     };
     document.getElementById('btn-clear').onclick = () => {
-        if (currentRoomId) {
-            db.ref(`chats/${currentRoomId}/drawing/strokes`).remove(); // Clear all strokes from DB
-            db.ref(`chats/${currentRoomId}/drawing/clearTimestamp`).set(Date.now()); // Send a clear signal
-        }
+        db.ref(`chats/${currentRoomId}/drawing-clear`).set(Date.now());
     };
 
     // YouTube Variables
@@ -1360,7 +1339,7 @@
     let isInternalChange = false;
 
     let peer, conn, typingTimeout;
-    let selectedReplyData = null; // Will store { id, type, content }
+    let selectedReply = null;
     let editingMessageId = null;
     let isWindowFocused = true;
     let currentRoomId = null;
@@ -1408,9 +1387,9 @@
         if (id && currentRoomId) {
             db.ref(`chats/${currentRoomId}/cinema`).set({
                 videoId: id,
-                state: 1, // Cambiado de -1 a 1 para intentar reproducir inmediatamente
+                state: -1,
                 time: 0,
-                sender: myUserId,
+                sender: myUserId, // Cambiado de peer.id a myUserId
                 timestamp: Date.now()
             });
             ytModal.style.display = 'none';
@@ -1428,7 +1407,7 @@
             db.ref(`chats/${currentRoomId}/cinema`).update({
                 state: state,
                 time: currentTime,
-                sender: myUserId,
+                sender: myUserId, // Cambiado de peer.id a myUserId
                 timestamp: Date.now()
             });
         }
@@ -1512,24 +1491,8 @@
             db.ref(`chats/${currentRoomId}/profiles/${myUserId}`).set(myProfileData);
         }
         profileModal.style.display = 'none';
-        // Ensure the toast is reset before showing it
-        toast.innerHTML = '<i class="fa-solid fa-circle-check"></i> Perfil actualizado con éxito';
         toast.classList.add('show');
         setTimeout(() => toast.classList.remove('show'), 3000);
-    };
-
-    // New button for Copy My ID in profile modal
-    document.getElementById('copy-my-id-btn').onclick = () => {
-        const myId = document.getElementById('my-peer-id').innerText;
-        navigator.clipboard.writeText(myId);
-        toast.innerHTML = '<i class="fa-solid fa-clipboard-check"></i> ID Copiado!'; // Changed text and icon
-        toast.classList.add('show');
-        setTimeout(() => {
-            toast.classList.remove('show');
-            // Reset toast to its original "Perfil actualizado" state
-            toast.innerHTML = '<i class="fa-solid fa-circle-check"></i> Perfil actualizado con éxito';
-        }, 3000);
-        profileModal.style.display = 'none';
     };
 
     chatFileInput.onchange = (e) => {
@@ -1552,19 +1515,20 @@
                 type: 'image', 
                 data: base64, 
                 id: msgId, 
-                replyTo: selectedReplyData, // Use selectedReplyData here
-                sender: myUserId,
+                replyTo: selectedReply, 
+                sender: peer.id, // Se mantuvo como peer.id según la instrucción de no tocar salvo YouTube y typing bubble
                 time: new Date().toISOString(),
                 seen: false
             };
             saveMessageToFirebase(msgData);
-            selectedReplyData = null;
+            selectedReply = null;
             replyPreview.style.display = 'none';
         };
         reader.readAsDataURL(file);
     }
 
     function initPeer() {
+        const savedMyId = localStorage.getItem('love_my_peer_id');
 		const peerConfig = {
             config: {
                 'iceServers': [
@@ -1576,12 +1540,12 @@
                 ]    
             }
         };
-        peer = myUserId ? new Peer(myUserId, peerConfig) : new Peer(peerConfig);
+        peer = savedMyId ? new Peer(savedMyId, peerConfig) : new Peer(peerConfig);
         
         peer.on('open', (id) => {
             myIdDisplay.innerText = id;
             localStorage.setItem('love_my_peer_id', id);
-            myUserId = id; // Update the global myUserId once peer is open
+            myUserId = id; // Actualiza myUserId con el ID real del peer
             if (partnerId) connectToPartner(partnerId);
         });
 
@@ -1594,7 +1558,7 @@
 
         myIdDisplay.onclick = () => { 
             navigator.clipboard.writeText(myIdDisplay.innerText); 
-            statusText.innerText = "¡Código copiado!";
+            statusText.innerText = "¡Código copiado!"; 
             setTimeout(() => statusText.innerText = "Listo para conectar", 2000); // Give feedback
         };
     }
@@ -1615,7 +1579,7 @@
     };
 
     function setupChatUI() {
-        currentRoomId = [myUserId, partnerId].sort().join('_'); // Use myUserId here
+        currentRoomId = [myUserId, partnerId].sort().join('_');
         connScreen.style.opacity = '0';
         setTimeout(() => {
             connScreen.style.display = 'none';
@@ -1623,8 +1587,8 @@
             cinemaContainer.style.display = 'flex';
             toolsPanel.style.display = 'flex';
             startFirebaseListeners(currentRoomId);
-            db.ref(`chats/${currentRoomId}/profiles/${myUserId}`).set(myProfileData); // Use myUserId here
-            db.ref(`chats/${currentRoomId}/presence/${myUserId}`).set('En línea'); // Use myUserId here
+            db.ref(`chats/${currentRoomId}/profiles/${myUserId}`).set(myProfileData);
+            db.ref(`chats/${currentRoomId}/presence/${myUserId}`).set('En línea');
         }, 500);
 
         conn.on('data', (data) => {
@@ -1673,61 +1637,17 @@
             }
         });
 
-        // --- Drawing Persistence and Real-time ---
-        // Clear previous drawing listeners to avoid duplicates on reload/reconnect
-        db.ref(`chats/${roomId}/drawing/strokes`).off();
-        db.ref(`chats/${roomId}/drawing/clearTimestamp`).off();
-        
-        // Clear the canvas initially on connection or reconnect
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        let lastKnownClearTimestamp = 0; // To track when the canvas was last cleared
-
-        // Listen for clear events
-        db.ref(`chats/${roomId}/drawing/clearTimestamp`).on('value', (snapshot) => {
-            const timestamp = snapshot.val();
-            if (timestamp && timestamp > lastKnownClearTimestamp) {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                lastKnownClearTimestamp = timestamp;
-            }
-        });
-
-        // Initial load: Fetch all existing strokes and render them
-        db.ref(`chats/${roomId}/drawing/strokes`).once('value', (snapshot) => {
-            snapshot.forEach((childSnapshot) => {
-                const data = childSnapshot.val();
-                renderStroke(data); // Render all historical strokes
-            });
-        });
-        
-        // Now listen for new strokes added in real-time
-        db.ref(`chats/${roomId}/drawing/strokes`).on('child_added', (snapshot) => {
+        // Listener de Dibujo Realtime
+        db.ref(`chats/${roomId}/drawing`).on('value', (snapshot) => {
             const data = snapshot.val();
-            // Only render if it's from another user, as our own strokes are rendered locally immediately.
-            if (data.sender !== myUserId) {
+            if (data && data.sender !== myUserId) { // Usar myUserId aquí también
                 renderStroke(data);
             }
         });
 
-        // Handle window resize for drawing - redraw all strokes
-        window.removeEventListener('resize', resizeAndRedrawAllStrokes);
-        window.addEventListener('resize', resizeAndRedrawAllStrokes);
-
-        function resizeAndRedrawAllStrokes() {
-            resizeCanvas(); // This clears the canvas and resizes it to new window dimensions.
-            
-            // Re-render all strokes from Firebase history to adapt to new canvas size.
-            db.ref(`chats/${roomId}/drawing/strokes`).once('value', (snapshot) => {
-                snapshot.forEach((childSnapshot) => {
-                    const data = childSnapshot.val();
-                    renderStroke(data);
-                });
-            });
-        }
-        // Initial call to resize canvas on connection
-        resizeCanvas();
-
-        // --- End Drawing Persistence ---
+        db.ref(`chats/${roomId}/drawing-clear`).on('value', () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        });
 
         // Listener de Cine (YouTube)
         db.ref(`chats/${roomId}/cinema`).on('value', (snapshot) => {
@@ -1743,7 +1663,7 @@
                 setTimeout(() => isInternalChange = false, 1000);
             }
 
-            if (data.sender !== myUserId) {
+            if (data.sender !== myUserId) { // Usar myUserId aquí también
                 isInternalChange = true;
                 const localTime = ytPlayer.getCurrentTime();
                 if (Math.abs(localTime - data.time) > 2) {
@@ -1778,23 +1698,12 @@
 
     userInput.oninput = () => { if (conn && conn.open) conn.send({ type: 'typing' }); };
 
-    function addMessage(content, type, replyToData = null, id, isImage = false, isSticker = false) {
+    function addMessage(content, type, replyTo = null, id, isImage = false, isSeen = false, isSticker = false) {
         const container = document.createElement('div');
         container.className = `msg-container ${type} ${isImage ? 'has-image' : ''}`;
         container.setAttribute('data-id', id);
-        container.setAttribute('data-type', isSticker ? 'sticker' : (isImage ? 'image' : 'chat'));
-        container.setAttribute('data-content', content); // Store actual content (text or URL)
 
-        let replyHtml = '';
-        if (replyToData) {
-            let replyContentHtml = '';
-            if (replyToData.type === 'image' || replyToData.type === 'sticker') {
-                replyContentHtml = `<img src="${replyToData.content}" style="width: 30px; height: 30px; object-fit: cover; margin-right: 5px; border-radius: 5px; opacity: 0.7;">`;
-            } else {
-                replyContentHtml = twemoji.parse(replyToData.content.length > 30 ? replyToData.content.substring(0, 30) + '...' : replyToData.content);
-            }
-            replyHtml = `<span class="reply-content"><i class="fa-solid fa-reply"></i> ${replyContentHtml}</span>`;
-        }
+        let replyHtml = replyTo ? `<span class="reply-content"><i class="fa-solid fa-reply"></i> ${twemoji.parse(replyTo.length > 20 ? 'Imagen/Texto' : replyTo)}</span>` : '';
         
         let bodyHtml = '';
         if (isSticker) {
@@ -1812,7 +1721,7 @@
         let statusContent = (type === 'sent') ? (isSeen ? 'Visto' : '<div class="loading-ring"></div>') : '';
 
         container.innerHTML = `
-            <i class="fa-solid fa-ellipsis-vertical msg-menu-btn" onclick="openMsgOptions('${id}')"></i>
+            <i class="fa-solid fa-ellipsis-vertical msg-menu-btn" onclick="openMsgOptions('${id}', '${isImage}', '${type}', '${isImage ? 'Imagen' : (isSticker ? 'Sticker' : content.replace(/'/g, "\\'"))}', ${isSticker})"></i>
             <div class="msg msg-${type}" ondblclick="handleDblClick(event, '${id}')">
                 ${replyHtml}
                 ${bodyHtml}
@@ -1829,10 +1738,10 @@
                 twemoji.parse(msgTextElement);
             }
         }
-        // Also parse the reply content after it's in the DOM
+        // Also parse the reply content
         const replyContentElement = container.querySelector('.reply-content');
         if (replyContentElement) {
-             twemoji.parse(replyContentElement);
+            twemoji.parse(replyContentElement);
         }
 
         if(type === 'sent' && !isSeen) {
@@ -1844,26 +1753,21 @@
         scrollToBottom();
     }
 
-    window.openMsgOptions = (id) => {
+    window.openMsgOptions = (id, isImage, type, text, isSticker) => {
         optionsMenu.innerHTML = '';
-        const msgEl = document.querySelector(`[data-id="${id}"]`);
-        if (!msgEl) return;
-
-        const msgType = msgEl.getAttribute('data-type');
-        const msgContent = msgEl.getAttribute('data-content');
-        const msgSenderType = msgEl.classList.contains('sent') ? 'sent' : 'received';
+        const isImg = isImage === 'true';
         
         const replyBtn = document.createElement('button');
         replyBtn.className = 'action-btn';
         replyBtn.innerHTML = '<i class="fa-solid fa-reply"></i>';
-        replyBtn.onclick = () => { prepareReply(id, msgType, msgContent); closeOptions(); };
+        replyBtn.onclick = () => { prepareReply(id, text); closeOptions(); };
         optionsMenu.appendChild(replyBtn);
 
-        if (msgType === 'chat' && msgSenderType === 'sent') {
+        if (!isImg && !isSticker && type === 'sent') {
             const editBtn = document.createElement('button');
             editBtn.className = 'action-btn';
             editBtn.innerHTML = '<i class="fa-solid fa-pen"></i>';
-            editBtn.onclick = () => { prepareEdit(id, msgContent); closeOptions(); };
+            editBtn.onclick = () => { prepareEdit(id, text); closeOptions(); };
             optionsMenu.appendChild(editBtn);
         }
 
@@ -1936,31 +1840,25 @@
         if (currentRoomId) db.ref(`chats/${currentRoomId}/messages/${id}`).remove();
     };
 
-    window.prepareReply = (id, type, content) => {
+    window.prepareReply = (id, text) => {
         editingMessageId = null;
-        selectedReplyData = { id, type, content };
-        let previewHtml = 'Respondiendo a: ';
-        if (type === 'image' || type === 'sticker') {
-            previewHtml += `<img src="${content}" style="width: 25px; height: 25px; object-fit: cover; margin-right: 5px; border-radius: 5px; opacity: 0.7;">`;
-        } else {
-            previewHtml += twemoji.parse(content.length > 30 ? content.substring(0, 30) + '...' : content);
-        }
-        replyTextPreview.innerHTML = previewHtml;
+        selectedReply = text;
+        replyTextPreview.innerHTML = `Respondiendo a: ${twemoji.parse(text)}`;
         replyPreview.style.display = 'flex';
         userInput.focus();
     };
 
-    window.prepareEdit = (id, content) => {
-        selectedReplyData = null;
+    window.prepareEdit = (id, text) => {
+        selectedReply = null;
         editingMessageId = id;
-        replyTextPreview.innerHTML = `Editando: ${twemoji.parse(content.length > 30 ? content.substring(0, 30) + '...' : content)}`;
+        replyTextPreview.innerHTML = `Editando: ${twemoji.parse(text)}`;
         replyPreview.style.display = 'flex';
-        userInput.value = content;
+        userInput.value = text;
         userInput.focus();
     };
 
     cancelReply.onclick = () => {
-        selectedReplyData = null;
+        selectedReply = null;
         editingMessageId = null;
         replyPreview.style.display = 'none';
         userInput.value = "";
@@ -1970,9 +1868,7 @@
 
     sendBtn.onclick = () => {
         const t = userInput.value.trim();
-        // If no text and not editing, do nothing. If editing, empty text means update message.
-        if (!t && !editingMessageId) return; 
-        if (!currentRoomId) return;
+        if (!t || !currentRoomId) return;
 
         if (editingMessageId) {
             db.ref(`chats/${currentRoomId}/messages/${editingMessageId}`).update({ text: t });
@@ -1980,11 +1876,13 @@
         } else {
             const msgId = Date.now();
             const msgData = { 
-                type: 'chat', text: t, replyTo: selectedReplyData, id: msgId, 
-                sender: myUserId, time: new Date().toISOString(), seen: false
+                type: 'chat', text: t, replyTo: selectedReply, id: msgId, 
+                sender: myUserId, // Cambiado de peer.id a myUserId
+                time: new Date().toISOString(),
+                seen: false
             };
             saveMessageToFirebase(msgData);
-            selectedReplyData = null;
+            selectedReply = null;
         }
         replyPreview.style.display = 'none';
         userInput.value = "";
